@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>退货批次隔离处理</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; margin: 0; background: #f4f6f9; color: #263238; }
+        header { background: #4a148c; color: #fff; padding: 14px 24px; font-size: 18px; font-weight: bold; }
+        main { max-width: 1320px; margin: 18px auto; padding: 0 16px; }
+        section { background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 16px 20px; margin-bottom: 18px; }
+        h2 { font-size: 16px; margin: 0 0 12px; padding-left: 8px; border-left: 4px solid #4a148c; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { border: 1px solid #e0e0e0; padding: 6px 8px; text-align: left; vertical-align: top; }
+        th { background: #f3e5f5; white-space: nowrap; }
+        .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 14px; }
+        .grid label { display: flex; flex-direction: column; font-size: 12px; color: #546e7a; gap: 3px; }
+        input, select, textarea { padding: 5px 7px; border: 1px solid #b0bec5; border-radius: 4px; font-size: 13px; }
+        button { padding: 5px 12px; border: none; border-radius: 4px; background: #4a148c; color: #fff; cursor: pointer; font-size: 12px; }
+        button.ghost { background: #607d8b; }
+        button.danger { background: #c62828; }
+        .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+        .tag.ok { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
+        .tag.bad { background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
+        .tag.warn { background: #fff8e1; color: #ef6c00; border: 1px solid #ffe082; }
+        .tag.info { background: #e3f2fd; color: #1565c0; border: 1px solid #90caf9; }
+        .muted { color: #78909c; font-size: 12px; }
+        .banner { border-radius: 8px; padding: 10px 18px; margin-bottom: 18px; font-size: 13px;
+                  background: #f3e5f5; color: #4a148c; border: 1px solid #ce93d8; }
+        .msg { margin: 8px 0; font-size: 13px; white-space: pre-wrap; }
+        .msg.ok { color: #2e7d32; } .msg.err { color: #c62828; }
+        .mono { font-family: Consolas, monospace; }
+        .sub { margin: 8px 0 4px; font-size: 13px; font-weight: bold; color: #37474f; }
+        details { margin-top: 6px; } summary { cursor: pointer; color: #4a148c; font-size: 12px; }
+        .card { border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px 12px; margin-bottom: 14px; }
+    </style>
+</head>
+<body>
+<header>冷链 V11 · 退货批次隔离处理（三类退货原因 · 隔离后不能再次出库 · 检验后双人复核决定）</header>
+<main>
+
+    <div class="banner">
+        页面、列表导出（CSV）与后台接口读同一视图查询：原销售运输批次被置为无效（撤回）后，
+        退货快照不变、原批次状态一致展示为「已作废（无效）」，三者严格同口径。
+        <a href="/api/cold-chain/returns/export" style="color:#4a148c;font-weight:bold;">导出退货批次列表 CSV</a>
+    </div>
+
+    <div id="globalMsg" class="msg"></div>
+
+    <!-- 1) 登记退货 -->
+    <section>
+        <h2>1. 登记退货（收货拒签 / 温度超限 / 包装破损；原销售批次只读关联，登记即固化快照）</h2>
+        <form id="registerForm" class="grid" onsubmit="return false;">
+            <label>原销售运输批次*
+                <select name="sourceBatchId" required>
+                    <option value="">— 请选择批次 —</option>
+                    <option th:each="b : ${sourceCandidates}" th:value="${b.id}"
+                            th:text="${b.batchNo} + '（' + ${b.receiverOrg} + '，发运' + ${b.shipQty} + '）'"></option>
+                </select>
+            </label>
+            <label>退货原因类型*
+                <select name="reasonType" required>
+                    <option value="REJECTION">收货拒签</option>
+                    <option value="TEMP_EXCURSION">温度超限</option>
+                    <option value="PACKAGE_DAMAGE">包装破损</option>
+                </select>
+            </label>
+            <label>退货数量*<input name="returnQty" type="number" min="1" required></label>
+            <label>关联运输异常ID<input name="exceptionId" type="number" min="1" placeholder="可空，类型须匹配"></label>
+            <label style="grid-column: span 4;">原因明细*（必须留下依据）
+                <textarea name="reasonDetail" required placeholder="如：收货方验收拒签，整批退回"></textarea>
+            </label>
+            <div style="grid-column: span 4;">
+                <button type="submit">登记退货</button>
+                <span class="muted">登记后状态=已登记，需办理入隔离库位；此后不能再次出库</span>
+            </div>
+        </form>
+        <div id="registerMsg" class="msg"></div>
+    </section>
+
+    <!-- 2) 退货批次隔离处理 -->
+    <section>
+        <h2>2. 退货批次隔离处理（入隔离 → 检验 → 双人复核决定：放行 / 销毁 / 转待查）</h2>
+        <p class="muted" th:if="${#lists.isEmpty(returnViews)}">暂无退货批次。</p>
+
+        <div class="card" th:each="v : ${returnViews}">
+            <div class="sub">
+                退货单 <span class="mono" th:text="${v.returnBatch.returnNo}"></span>
+                <span class="tag info" th:text="${v.statusName}"></span>
+                <span class="tag warn" th:text="${v.reasonTypeName}"></span>
+                原批次 <span class="mono" th:text="${v.returnBatch.sourceBatchNo}"></span>
+                <span class="tag bad" th:if="${v.sourceBatchInvalid}"
+                      th:text="${v.sourceBatchStatusName}">已作废（无效）</span>
+                <span class="tag ok" th:unless="${v.sourceBatchInvalid}"
+                      th:text="${v.sourceBatchStatusName}"></span>
+            </div>
+            <div class="muted">
+                药品 <span th:text="${v.returnBatch.drugNameSnap}"></span>
+                ｜批准文号 <span th:text="${v.returnBatch.approvalNoSnap}"></span>
+                ｜温区 <span th:text="${v.returnBatch.tempMinSnap} + ' ~ ' + ${v.returnBatch.tempMaxSnap} + '℃'"></span>
+                ｜数量 <span th:text="${v.returnBatch.returnQty}"></span>
+                ｜当前库位 <b th:text="${v.returnBatch.currentLocation ?: '未入隔离'}"></b>
+                ｜原因明细：<span th:text="${v.returnBatch.reasonDetail}"></span>
+            </div>
+
+            <!-- 状态对应操作（与后台同一套卡口，被拦截时直接展示停点说明） -->
+            <div style="margin:6px 0;">
+                <button th:if="${v.returnBatch.status == 'REGISTERED'}"
+                        th:onclick="'isolate(' + ${v.returnBatch.id} + ')'">入隔离库位</button>
+                <button th:if="${v.returnBatch.status == 'ISOLATED' or v.returnBatch.status == 'INSPECTED' or v.returnBatch.status == 'PENDING_REVIEW'}"
+                        class="ghost" th:onclick="'move(' + ${v.returnBatch.id} + ')'">隔离区内移动</button>
+                <button th:if="${v.returnBatch.status == 'ISOLATED' or v.returnBatch.status == 'PENDING_REVIEW'}"
+                        th:onclick="'inspect(' + ${v.returnBatch.id} + ')'">质量检验（QA）</button>
+                <button th:if="${v.returnBatch.status == 'INSPECTED'}"
+                        th:onclick="'decide(' + ${v.returnBatch.id} + ')'">提出处理决定</button>
+                <span th:each="d : ${v.decisions}" th:if="${d.status == 'PENDING'}">
+                    <button class="danger"
+                            th:onclick="'review(' + ${d.id} + ', true)'">复核通过（#<span th:text="${d.id}"></span>）</button>
+                    <button class="ghost"
+                            th:onclick="'review(' + ${d.id} + ', false)'">复核驳回（#<span th:text="${d.id}"></span>）</button>
+                </span>
+                <a th:href="'/api/cold-chain/returns/' + ${v.returnBatch.id} + '/evidence'"
+                   style="font-size:12px;color:#4a148c;margin-left:8px;">导出证据链 CSV</a>
+            </div>
+
+            <details>
+                <summary>移动留痕 / 检验记录 / 处理决定（双人复核）</summary>
+                <div class="sub">移动留痕（每次移动记录库位、人员和时间）</div>
+                <table>
+                    <tr><th>时间</th><th>类型</th><th>源库位</th><th>目标库位</th><th>操作人</th><th>说明</th></tr>
+                    <tr th:each="m : ${v.movements}">
+                        <td class="mono" th:text="${m.moveTime}"></td>
+                        <td th:text="${m.moveType}"></td>
+                        <td th:text="${m.fromLocation ?: '—'}"></td>
+                        <td th:text="${m.toLocation}"></td>
+                        <td th:text="${m.operatorName}"></td>
+                        <td th:text="${m.note}"></td>
+                    </tr>
+                    <tr th:if="${#lists.isEmpty(v.movements)}"><td colspan="6" class="muted">暂无移动记录</td></tr>
+                </table>
+                <div class="sub">质量检验</div>
+                <table>
+                    <tr><th>时间</th><th>结论</th><th>检验人</th><th>说明</th></tr>
+                    <tr th:each="i : ${v.inspections}">
+                        <td class="mono" th:text="${i.inspectTime}"></td>
+                        <td th:text="${i.inspectResult}"></td>
+                        <td th:text="${i.inspectorName}"></td>
+                        <td th:text="${i.inspectNote}"></td>
+                    </tr>
+                    <tr th:if="${#lists.isEmpty(v.inspections)}"><td colspan="4" class="muted">暂无检验记录</td></tr>
+                </table>
+                <div class="sub">处理决定（提出人与复核人必须是不同账号）</div>
+                <table>
+                    <tr><th>ID</th><th>决定</th><th>理由</th><th>目标库位</th><th>状态</th><th>提出人/时间</th><th>复核人/时间</th><th>复核意见</th></tr>
+                    <tr th:each="d : ${v.decisions}">
+                        <td class="mono" th:text="${d.id}"></td>
+                        <td th:text="${d.decisionType}"></td>
+                        <td th:text="${d.reason}"></td>
+                        <td th:text="${d.targetLocation ?: '留在隔离区'}"></td>
+                        <td th:text="${d.status}"></td>
+                        <td th:text="${d.proposeName} + ' / ' + ${d.proposeTime}"></td>
+                        <td th:text="${d.reviewName == null ? '—' : d.reviewName + ' / ' + d.reviewTime}"></td>
+                        <td th:text="${d.reviewNote}"></td>
+                    </tr>
+                    <tr th:if="${#lists.isEmpty(v.decisions)}"><td colspan="8" class="muted">暂无处理决定</td></tr>
+                </table>
+            </details>
+        </div>
+    </section>
+
+</main>
+
+<script>
+    var API = '/api/cold-chain';
+    function show(id, text, ok) {
+        var el = document.getElementById(id);
+        if (!el) { el = document.getElementById('globalMsg'); }
+        el.textContent = text;
+        el.className = 'msg ' + (ok ? 'ok' : 'err');
+    }
+    function postJson(path, data) {
+        return fetch(API + path, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            credentials: 'same-origin', body: JSON.stringify(data)
+        }).then(function (r) { return r.json(); });
+    }
+    document.getElementById('registerForm').addEventListener('submit', function (e) {
+        e.preventDefault();
+        var data = {};
+        new FormData(this).forEach(function (v, k) { if (v !== '') { data[k] = v; } });
+        data.sourceBatchId = Number(data.sourceBatchId);
+        data.returnQty = Number(data.returnQty);
+        if (data.exceptionId) { data.exceptionId = Number(data.exceptionId); }
+        postJson('/returns', data).then(function (resp) {
+            if (resp.success) {
+                show('registerMsg', '登记成功：' + resp.data.returnNo + '（已登记，请办理入隔离库位）', true);
+                setTimeout(function () { location.reload(); }, 700);
+            } else { show('registerMsg', '被拦截：' + resp.message, false); }
+        });
+    });
+    function isolate(id) {
+        var loc = prompt('请输入隔离库位（须以 ISO 开头，如 ISO-A-01；入隔离后不能再次出库）：');
+        if (!loc) { return; }
+        var note = prompt('入隔离说明（可空）：') || '';
+        postJson('/returns/' + id + '/isolate', {isolationLocation: loc, note: note}).then(function (resp) {
+            if (resp.success) { location.reload(); } else { show('globalMsg', '入隔离被拦截：' + resp.message, false); }
+        });
+    }
+    function move(id) {
+        var loc = prompt('请输入目标隔离库位（仍须以 ISO 开头；不能借此出库）：');
+        if (!loc) { return; }
+        var note = prompt('移动说明（可空）：') || '';
+        postJson('/returns/' + id + '/move', {toLocation: loc, note: note}).then(function (resp) {
+            if (resp.success) { location.reload(); } else { show('globalMsg', '移动被拦截：' + resp.message, false); }
+        });
+    }
+    function inspect(id) {
+        var result = prompt('检验结论（PASS 合格 / FAIL 不合格）：');
+        if (!result) { return; }
+        var note = prompt('检验说明（必填）：');
+        if (!note) { return; }
+        postJson('/returns/' + id + '/inspect', {inspectResult: result, inspectNote: note}).then(function (resp) {
+            if (resp.success) { location.reload(); } else { show('globalMsg', '检验被拦截：' + resp.message, false); }
+        });
+    }
+    function decide(id) {
+        var type = prompt('处理决定（RELEASE 放行 / DESTROY 销毁 / PENDING_REVIEW 转待查）：');
+        if (!type) { return; }
+        var reason = prompt('决定理由（必填）：');
+        if (!reason) { return; }
+        var target = '';
+        if (type.trim().toUpperCase() !== 'PENDING_REVIEW') {
+            target = prompt('目标库位（放行->合格品库位，销毁->销毁区；不能仍是隔离库位）：') || '';
+        }
+        postJson('/returns/' + id + '/decisions',
+            {decisionType: type, reason: reason, targetLocation: target}).then(function (resp) {
+            if (resp.success) { location.reload(); } else { show('globalMsg', '决定被拦截：' + resp.message, false); }
+        });
+    }
+    function review(decisionId, approved) {
+        var note = prompt(approved ? '复核意见（通过，第二账号）：' : '复核意见（驳回，退回已检验）：');
+        if (!note) { return; }
+        postJson('/returns/decisions/' + decisionId + '/review',
+            {approved: approved, reviewNote: note}).then(function (resp) {
+            if (resp.success) { location.reload(); } else { show('globalMsg', '复核被拦截：' + resp.message, false); }
+        });
+    }
+</script>
+</body>
+</html>
