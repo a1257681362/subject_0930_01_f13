@@ -91,6 +91,8 @@ public class TransportBatchService {
     private DeliveryWindowService deliveryWindowService;
     @Resource
     private BatchRescheduleService batchRescheduleService;
+    @Resource
+    private TraceService traceService;
 
     /** 派车：生成稳定批次号，固化档案快照，关联发货单与车辆 */
     @Transactional
@@ -192,6 +194,9 @@ public class TransportBatchService {
                                         lockedPrice.getLockedPriceNo(), lockedPrice.getCarrierNameSnap(),
                                         lockedPrice.getFinalTotalAmount()))
                         + windowDesc);
+
+        // V13 追溯图仓储节点：派车备货，批次档案快照/时窗锚点已固化（AUTO 幂等，重入不重复发布）
+        traceService.recordWarehouse(batch);
         return batch;
     }
 
@@ -263,6 +268,9 @@ public class TransportBatchService {
                         + (routeVersion == null ? "" : String.format(
                                 "；路线季节版本=%s V%d，逐段固化温区分段 %d 段（发运后版本变更不影响本批次）",
                                 routeVersion.getSeason(), routeVersion.getVersionNo(), snapCount)));
+
+        // V13 追溯图发运节点：在途责任主体、探头凭证、路线季节版本当时状态快照固化
+        traceService.recordShip(batch);
         return batch;
     }
 
@@ -650,6 +658,9 @@ public class TransportBatchService {
                         batch.getResponsibleOrg() == null ? "原承运方" : batch.getResponsibleOrg(),
                         batch.getResponsibleParty() == null ? "" : batch.getResponsibleParty(),
                         batch.getArrivedBoxQty() == null ? "" : "；分仓交接全部封签核验通过、箱数平衡"));
+
+        // V13 追溯图签收节点：按快照核对一致闭环的当时状态快照（电子签收激活同样经过此入口）
+        traceService.recordSign(batch);
         return batch;
     }
 

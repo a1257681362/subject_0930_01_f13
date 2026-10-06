@@ -58,6 +58,8 @@ public class HandoverService {
     private ExceptionLifecycleService exceptionLifecycleService;
     @Resource
     private OpLogService opLogService;
+    @Resource
+    private TraceService traceService;
 
     // ---------------- 到仓登记 ----------------
 
@@ -311,6 +313,9 @@ public class HandoverService {
                         order.getHandoverNo(), order.getBoxQty(), order.getSealQty(), order.getHandoverTemp(),
                         nz(fromOrg), nz(fromParty), order.getReceiverOrg(), order.getReceiverName(),
                         batch.getBatchNo(), submittedBoxes, batch.getArrivedBoxQty()));
+
+        // V13 追溯图中转节点：交接提交、逐签核验当时状态固化，交出/接收责任主体入快照
+        traceService.recordTransit(order, fromOrg, fromParty);
         return order;
     }
 

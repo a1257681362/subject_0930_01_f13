@@ -1089,3 +1089,106 @@ curl -u qa:qa123 -OJ http://localhost:8080/api/cold-chain/returns/1/evidence
 不冻结；人工修正只追加（原行不变、有效值视图随最新修正、设备时间禁止修正）；批量同步
 部分成功时失败/部分回执各开立电子签收侧↔离线回执侧互指补偿、同步幂等不重复开立、
 补传成功后两侧补偿一并闭环。全套 62 个用例通过。
+
+## 冷链运输 V13：药品批次追溯图
+
+在 V1~V12 台账上新增"药品批次追溯图"：链路由**采购、仓储、发运、中转、签收、退货**
+六类节点组成，每个节点在发布当刻由系统采集业务表当时状态并固化为不可变状态快照；
+节点补录只能漏记补建或追加补充，**不能改变已发布快照**。不同岗位只能看到授权范围内
+的机构与联系方式；追溯结果支持按批次号或封签号反查；导出标明数据截止时间与过滤条件。
+冷链药品运输的同一操作并发发起时，恰好一个生效、其余被拒绝，双方与拒绝原因均保留审计。
+
+### 核心规则
+
+- **六节点链路、发布即快照**：采购（发货单创建锁档案版本，此时批次尚未派车，以订单为
+  链路锚）→ 仓储（派车备货）→ 发运（在途，承运责任主体/探头凭证/路线版本）→
+  中转（交接单提交、逐签核验、责任主体随单转移，封签逐枚固化）→ 签收（按快照核对闭环）
+  → 退货（登记即固化，原销售批次只读关联）。节点 `status_snapshot` 保存发布当刻系统采集
+  的完整状态 JSON，应用层没有任何更新/删除节点或快照的路径。
+- **节点补录不能改变已发布快照**：漏记节点可补建（`source=BACKFILL`，可填历史业务发生
+  时间，仍是不可变快照）；对已发布节点只能 `NOTE/FILE/CORRECTION_REF` 追加补充行，
+  已发布快照原值绝不改变；同一业务键重复发布一律拒绝。发布/补录按 `requestId` 幂等：
+  同键同载荷重放回首次结果（replay=true），同键不同载荷拒绝。
+- **同一操作并发仲裁 + 审计**：仲裁键 `op_key=批次|节点类型|业务键` 数据库唯一约束兜底。
+  冷链同一操作并发/重复发起时恰好一个 `WIN` 生效、其余 `LOST` 被拒绝；拒绝说明指明
+  "谁（账号/节点号/时间）已生效、本次被拒绝"。`t_cc_trace_op_audit` 对 WIN/LOST 双方各
+  留一行（LOST 指向对方生效节点），**LOST 审计用独立事务写入，主事务回滚不影响审计保留**。
+- **按岗位机构授权**：`t_cc_trace_org_grant` 维护"账号 → 可见机构（`*` 全域）→ 联系方式
+  是否明文"。未授权机构的节点仍在链路中（链路不断），但机构名/联系人/电话全部掩码；
+  授权但未给联系方式明文时电话脱敏为 `前3位+******+后2位`；快照 JSON 原文同样按授权掩码
+  后下发，不能从原文绕行。授权收紧/撤销只影响此后查询/导出口径，已发布节点事实不变。
+- **按批次或封签反查**：`GET /trace/graph/by-batch-no` 与 `GET /trace/graph/by-seal`
+  （封签命中中转节点的封签锚点后返回整条链路并标记命中节点）；可叠加节点类型/机构过滤，
+  按未授权机构过滤直接拒绝；结果总是回带 `dataCutoffTime`（数据截止时间）与 `filters`
+  （全部过滤条件与查询岗位）。
+- **导出标明截止时间与过滤条件**：CSV 头逐行标明数据截止时间、批次号/封签号/节点类型/
+  机构过滤条件、查询岗位、节点总数/导出数/被过滤数与授权掩码口径；每次导出写操作日志与
+  `t_cc_trace_op_audit`（filter_json 含全部过滤条件）。
+- 业务自动节点（AUTO）与手工/补建节点统一走同一仲裁与快照口径；自动挂钩使用确定性
+  requestId，主流程重入安全（不重复发布）。
+
+### 表结构增量（详见 schema.sql，版本标记 `cold-chain-13`）
+
+- 新增 `t_cc_trace_org_grant`（岗位机构授权，ACTIVE/REVOKED 留痕，含演示种子）、
+  `t_cc_trace_node`（六类节点，不可变 JSON 快照，op_key 唯一）、
+  `t_cc_trace_node_seal`（节点发布当刻逐签固化的封签锚点）、
+  `t_cc_trace_node_supplement`（已发布节点补充，只追加）、
+  `t_cc_trace_publish_request`（requestId 幂等登记）、
+  `t_cc_trace_op_audit`（并发仲裁/导出/授权审计，只追加）；
+  序列 `seq_cc_trace_node_no`（节点号 `ZS+8位`）。
+- 采购节点先于批次发布：节点以 `order_id` 为链路锚（采购节点 batch_id 为空），
+  派车后的节点同时持 order_id 与 batch_id。
+
+### 接口增量（仍在 `/api/cold-chain` 下，HTTP Basic）
+
+| 动作 | 方法与路径 | 权限 |
+| --- | --- | --- |
+| 手工发布节点 | `POST /trace/nodes/publish` | `coldchain:trace:publish` |
+| 漏记节点补建（BACKFILL，可填历史时间） | `POST /trace/nodes/backfill` | `coldchain:trace:publish` |
+| 已发布节点追加补充（不改快照） | `POST /trace/nodes/supplement` | `coldchain:trace:publish` |
+| 按批次ID查看追溯图 | `GET /trace/graph/batch/{batchId}` | `coldchain:trace:view` |
+| 按批次号反查 | `GET /trace/graph/by-batch-no?batchNo=` | `coldchain:trace:view` |
+| 按封签号反查 | `GET /trace/graph/by-seal?sealNo=` | `coldchain:trace:view` |
+| 节点详情（封签锚点+补充，授权掩码） | `GET /trace/nodes/{id}` | `coldchain:trace:view` |
+| 并发/导出/授权审计流水 | `GET /trace/audits` | `coldchain:trace:view` |
+| 导出追溯 CSV（标明截止时间与过滤条件） | `GET /trace/export?batchId=/batchNo=/sealNo=` | `coldchain:trace:export` |
+| 岗位机构授权/撤销/列表 | `POST /trace/grants`、`POST /trace/grants/revoke`、`GET /trace/grants` | `coldchain:trace:grant` |
+| 追溯图页面 | `GET /ui/cold-chain/traces` | `coldchain:trace:view` |
+
+权限分配：admin（授权维护/全域明文，通配）、dispatcher（查看/导出/发布，全域明文）、
+carrier/receiver（查看，机构范围由授权表决定）、qa/inspector（查看/导出）；
+未授权岗位（如 device）403。示例（全链路后按封签反查、授权承运岗可见明文、补录节点）：
+
+```bash
+# 正常跑 建档→订单(采购节点)→派车(仓储)→发运→到仓→交接单逐签核验提交(中转)→签收→退货登记
+# 按封签号反查整条链路（命中中转节点）
+curl -u dispatcher:dispatcher123 \
+  'http://localhost:8080/api/cold-chain/trace/graph/by-seal?sealNo=SF001'
+
+# 授权承运岗可见承运机构与司机电话明文（撤销走 /trace/grants/revoke）
+curl -u admin:admin123 -H 'Content-Type: application/json' -X POST \
+  http://localhost:8080/api/cold-chain/trace/grants -d \
+  '{"username":"carrier","orgName":"V13验收物流-123","contactVisible":true}'
+
+# 漏记补建一个发运节点（历史业务时间；同 requestId 重放 replay=true，不新增节点）
+curl -u dispatcher:dispatcher123 -H 'Content-Type: application/json' -X POST \
+  http://localhost:8080/api/cold-chain/trace/nodes/backfill -d \
+  '{"requestId":"bf-001","batchId":1,"nodeType":"SHIP",
+    "occurredTime":"2026-10-04T08:00:00","orgName":"V13验收物流-123",
+    "contactName":"王司机","contactPhone":"13900000001","remark":"断网恢复补录"}'
+
+# 导出（CSV 头标明数据截止时间与过滤条件，逐次审计）
+curl -u qa:qa123 -OJ \
+  'http://localhost:8080/api/cold-chain/trace/export?batchId=1&nodeType=TRANSIT'
+```
+
+### V13 验收
+
+`TraceGraphIntegrationTest`（8 个用例，内存 H2 + 真实 Shiro HTTP Basic，Mapper 直查
+物理表）覆盖：六节点自动链路与发布当刻快照（采购锚订单/中转逐签锚点/签收核对字段）、
+补录只追加不改快照与同键重复发布被拒绝（指明谁已生效、物理表不增行）、requestId 幂等
+（同键重放/异载荷拒绝）与 BACKFILL 历史补建、**两账号同操作并发恰好一个 WIN 一个 LOST
+且双方操作者/拒绝原因/生效节点各留审计**（LOST 审计主事务回滚后仍可查）、岗位机构授权
+掩码（未授权全掩码→授权机构明文/电话可见→按未授权机构过滤拒绝→撤销恢复掩码，节点事实
+不受影响）、按批次号/封签号反查与节点类型过滤回显、导出 CSV 含数据截止时间与全部过滤
+条件并逐次审计（filter_json 可追）、401/403/200 权限分级。全套 70 个用例通过。

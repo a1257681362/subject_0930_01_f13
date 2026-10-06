@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>药品批次追溯图</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; margin: 0; background: #f4f6f9; color: #263238; }
+        header { background: #00695c; color: #fff; padding: 14px 24px; font-size: 18px; font-weight: bold; }
+        main { max-width: 1380px; margin: 18px auto; padding: 0 16px; }
+        section { background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 16px 20px; margin-bottom: 18px; }
+        h2 { font-size: 16px; margin: 0 0 12px; padding-left: 8px; border-left: 4px solid #00695c; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { border: 1px solid #e0e0e0; padding: 6px 8px; text-align: left; vertical-align: top; }
+        th { background: #e0f2f1; white-space: nowrap; }
+        .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 14px; }
+        .grid label { display: flex; flex-direction: column; font-size: 12px; color: #546e7a; gap: 3px; }
+        input, select, textarea { padding: 5px 7px; border: 1px solid #b0bec5; border-radius: 4px; font-size: 13px; }
+        button { padding: 5px 12px; border: none; border-radius: 4px; background: #00695c; color: #fff; cursor: pointer; font-size: 12px; }
+        button.ghost { background: #607d8b; }
+        button.warn { background: #ef6c00; }
+        .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+        .tag.ok { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
+        .tag.warn { background: #fff8e1; color: #ef6c00; border: 1px solid #ffe082; }
+        .tag.info { background: #e3f2fd; color: #1565c0; border: 1px solid #90caf9; }
+        .tag.lost { background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
+        .muted { color: #78909c; font-size: 12px; }
+        .banner { border-radius: 8px; padding: 10px 18px; margin-bottom: 18px; font-size: 13px;
+                  background: #e0f2f1; color: #00695c; border: 1px solid #80cbc4; }
+        .msg { margin: 8px 0; font-size: 13px; white-space: pre-wrap; }
+        .msg.ok { color: #2e7d32; } .msg.err { color: #c62828; }
+        .mono { font-family: Consolas, monospace; }
+        details { margin-top: 6px; } summary { cursor: pointer; color: #00695c; font-size: 12px; }
+        .chain { display: flex; align-items: stretch; gap: 0; overflow-x: auto; padding: 8px 0; }
+        .node { flex: 1 0 200px; border: 2px solid #80cbc4; border-radius: 8px; padding: 10px 12px; background: #f1f8f7; position: relative; }
+        .node.missing { border-style: dashed; border-color: #cfd8dc; background: #fafafa; color: #90a4ae; }
+        .node h3 { margin: 0 0 6px; font-size: 14px; color: #00695c; }
+        .arrow { align-self: center; font-size: 22px; color: #00897b; padding: 0 6px; }
+        .kv { font-size: 12px; line-height: 1.7; }
+        .kv b { color: #37474f; }
+        .sealchip { display: inline-block; background: #fff; border: 1px solid #b2dfdb; border-radius: 4px; padding: 0 5px; margin: 1px 2px 1px 0; font-size: 11px; }
+        .masked { color: #c62828; }
+        .hiddenbox { display: none; }
+    </style>
+</head>
+<body>
+<header>冷链 V13 · 药品批次追溯图（采购→仓储→发运→中转→签收→退货 · 发布即快照不可变 · 按机构授权可见）</header>
+<main>
+
+    <div class="banner">
+        每个节点保存发布当刻的状态快照，节点补录只追加补充、<b>不能改变已发布快照</b>；
+        不同岗位只能看到授权范围内的机构与联系方式（未授权机构/电话掩码）；
+        追溯支持按批次号或封签号反查；导出 CSV 标明<b>数据截止时间与过滤条件</b>。
+        <span th:if="${canExport}">｜<a href="/api/cold-chain/trace/export" style="color:#00695c;font-weight:bold;">导出当前追溯结果 CSV</a>（先查询后导出沿用下方过滤条件，可在链接后补 &batchId= / &sealNo= 等）</span>
+    </div>
+
+    <div id="globalMsg" class="msg"></div>
+
+    <!-- 1) 反查 -->
+    <section>
+        <h2>1. 追溯图查询 / 按批次号或封签反查</h2>
+        <form id="queryForm" class="grid" onsubmit="return false;">
+            <label>选择运输批次
+                <select name="batchId">
+                    <option value="">— 按下方批次号/封签号查询 —</option>
+                    <option th:each="b : ${batches}" th:value="${b.id}"
+                            th:text="${b.batchNo} + '（' + ${b.receiverOrg} + '，' + ${b.status} + '）'"></option>
+                </select>
+            </label>
+            <label>按批次号反查<input name="batchNo" placeholder="如 PC2026…"></label>
+            <label>按封签号反查<input name="sealNo" placeholder="如 SF001"></label>
+            <label>节点类型过滤
+                <select name="nodeType">
+                    <option value="">全部节点</option>
+                    <option value="PURCHASE">采购</option>
+                    <option value="WAREHOUSE">仓储</option>
+                    <option value="SHIP">发运</option>
+                    <option value="TRANSIT">中转</option>
+                    <option value="SIGN">签收</option>
+                    <option value="RETURN">退货</option>
+                </select>
+            </label>
+            <label>机构过滤（须在授权范围内）<input name="org" placeholder="精确机构名，可空"></label>
+            <div style="grid-column: span 3; align-self: end;">
+                <button type="submit">查询追溯图</button>
+            </div>
+        </form>
+        <div id="cutoff" class="muted"></div>
+        <div id="chain" class="chain"></div>
+    </section>
+
+    <!-- 2) 手工发布/补建（仅 coldchain:trace:publish） -->
+    <section th:if="${canPublish}">
+        <h2>2. 节点手工发布 / 漏记补建（同操作并发只一个生效，其余拒绝并留审计；补建不改已发布快照）</h2>
+        <form id="publishForm" class="grid" onsubmit="return false;">
+            <label>requestId（幂等键）*<input name="requestId" required placeholder="每次发布唯一，重放同值"></label>
+            <label>运输批次ID*<input name="batchId" type="number" required></label>
+            <label>节点类型*
+                <select name="nodeType" required>
+                    <option value="PURCHASE">采购</option>
+                    <option value="WAREHOUSE">仓储</option>
+                    <option value="SHIP">发运</option>
+                    <option value="TRANSIT">中转</option>
+                    <option value="SIGN">签收</option>
+                    <option value="RETURN">退货</option>
+                </select>
+            </label>
+            <label>业务键（中转=交接单号/退货=退货单号）<input name="bizKey" placeholder="默认 PRIMARY"></label>
+            <label>业务发生时间（漏记补建填历史时间）<input name="occurredTime" type="datetime-local"></label>
+            <label>机构<input name="orgName"></label>
+            <label>联系人<input name="contactName"></label>
+            <label>联系电话<input name="contactPhone"></label>
+            <label style="grid-column: span 3;">发布说明 / 封签号（中转补建，逗号分隔）
+                <input name="sealNosCsv" placeholder="SF001,SF002">
+            </label>
+            <label style="grid-column: span 4;">备注<textarea name="remark" rows="2"></textarea></label>
+            <div style="grid-column: span 4;">
+                <button type="submit" id="btnPublish">发布节点</button>
+                <button type="button" class="warn" id="btnBackfill">漏记节点补建（BACKFILL）</button>
+            </div>
+        </form>
+        <div id="publishMsg" class="msg"></div>
+    </section>
+
+    <!-- 3) 已发布节点补充（仅 coldchain:trace:publish，按节点ID追加） -->
+    <section th:if="${canPublish}">
+        <h2>3. 已发布节点追加补充（NOTE/FILE/CORRECTION_REF；只追加，不改变快照原值）</h2>
+        <form id="suppForm" class="grid" onsubmit="return false;">
+            <label>requestId*<input name="requestId" required></label>
+            <label>节点ID*<input name="nodeId" type="number" required></label>
+            <label>补充类型*
+                <select name="supplementType" required>
+                    <option value="NOTE">备注 NOTE</option>
+                    <option value="FILE">附件 FILE</option>
+                    <option value="CORRECTION_REF">更正依据 CORRECTION_REF</option>
+                </select>
+            </label>
+            <label>内容*<input name="content" required></label>
+            <div style="grid-column: span 4;"><button type="submit">追加补充</button></div>
+        </form>
+        <div id="suppMsg" class="msg"></div>
+    </section>
+
+    <!-- 4) 岗位机构授权（仅 coldchain:trace:grant） -->
+    <section th:if="${canGrant}">
+        <h2>4. 岗位机构授权（决定可见机构与联系方式明文；撤销只留痕，已发布节点事实保留）</h2>
+        <form id="grantForm" class="grid" onsubmit="return false;">
+            <label>被授权账号*<input name="username" required placeholder="如 carrier / receiver / qa / inspector"></label>
+            <label>授权机构名*（* = 全域）<input name="orgName" required placeholder="如 华东中转仓收货组"></label>
+            <label>联系方式可见明文
+                <select name="contactVisible"><option value="false">否（电话脱敏）</option><option value="true">是（可见明文）</option></select>
+            </label>
+            <div style="align-self:end;"><button type="submit">授权/调整</button></div>
+        </form>
+        <div id="grantMsg" class="msg"></div>
+        <div style="margin-top:10px;"><button type="button" class="ghost" id="btnLoadGrants">刷新授权列表</button></div>
+        <div id="grantsBox"></div>
+    </section>
+
+    <!-- 5) 并发仲裁审计 -->
+    <section>
+        <h2>5. 并发仲裁与导出/授权审计（谁生效 / 谁被拒绝 / 拒绝原因）</h2>
+        <button type="button" class="ghost" id="btnLoadAudits">刷新审计流水（最近200条）</button>
+        <div id="auditsBox"></div>
+    </section>
+
+</main>
+
+<script>
+    var API = '/api/cold-chain/trace';
+    var LAST_FILTERS = '';
+
+    function show(id, text, ok) {
+        var el = document.getElementById(id);
+        if (!el) { el = document.getElementById('globalMsg'); }
+        el.textContent = text;
+        el.className = 'msg ' + (ok ? 'ok' : 'err');
+    }
+    function getJson(path) {
+        return fetch(API + path, {credentials: 'same-origin'}).then(function (r) {
+            if (r.status === 403) { throw new Error('403 无权限'); }
+            return r.json();
+        });
+    }
+    function postJson(path, data) {
+        return fetch(API + path, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            credentials: 'same-origin', body: JSON.stringify(data)
+        }).then(function (r) { return r.json(); });
+    }
+    function fmt(v) { return v == null || v === '' ? '—' : String(v); }
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
+    var TYPE_ORDER = ['PURCHASE','WAREHOUSE','SHIP','TRANSIT','SIGN','RETURN'];
+    var TYPE_NAMES = {PURCHASE:'采购',WAREHOUSE:'仓储',SHIP:'发运',TRANSIT:'中转',SIGN:'签收',RETURN:'退货'};
+    var SOURCE_TAG = {AUTO:'业务自动',MANUAL:'手工',BACKFILL:'补建'};
+
+    document.getElementById('queryForm').addEventListener('submit', function () {
+        var f = {};
+        new FormData(this).forEach(function (v, k) { if (v !== '') { f[k] = v; } });
+        var path;
+        var qs = [];
+        if (f.nodeType) { qs.push('nodeType=' + encodeURIComponent(f.nodeType)); }
+        if (f.org) { qs.push('org=' + encodeURIComponent(f.org)); }
+        var q = qs.length ? '?' + qs.join('&') : '';
+        LAST_FILTERS = q;
+        if (f.sealNo) { path = '/graph/by-seal?sealNo=' + encodeURIComponent(f.sealNo) + (qs.length ? '&' + qs.join('&') : ''); }
+        else if (f.batchNo) { path = '/graph/by-batch-no?batchNo=' + encodeURIComponent(f.batchNo) + q; }
+        else if (f.batchId) { path = '/graph/batch/' + f.batchId + q; }
+        else { show('globalMsg', '请选择批次，或输入批次号/封签号', false); return; }
+        getJson(path).then(function (resp) {
+            if (!resp.success) { show('globalMsg', '查询失败：' + resp.message, false); return; }
+            renderGraph(resp.data);
+        }).catch(function (e) { show('globalMsg', e.message, false); });
+    });
+
+    function renderGraph(g) {
+        document.getElementById('cutoff').innerHTML =
+            '批次 <b class="mono">' + esc(g.batchNo) + '</b>｜数据截止时间 <b>' + fmt(g.dataCutoffTime) +
+            '</b>｜过滤条件：封签=' + esc(g.filters.sealNo || '全部') + '，节点类型=' + esc(g.filters.nodeType || '全部') +
+            '，机构=' + esc(g.filters.orgName || '全部') + '，查询岗位=' + esc(g.filters.operator) +
+            '｜节点总数 ' + g.nodeTotal + '，返回 ' + g.nodeReturned + '，被过滤排除 ' + g.filteredOut;
+        var byType = {};
+        g.nodes.forEach(function (n) {
+            if (!byType[n.nodeType]) { byType[n.nodeType] = []; }
+            byType[n.nodeType].push(n);
+        });
+        var html = '';
+        TYPE_ORDER.forEach(function (t, idx) {
+            var list = byType[t] || [];
+            if (list.length === 0) {
+                html += '<div class="node missing"><h3>' + TYPE_NAMES[t] + '</h3><div class="kv muted">暂无已发布节点</div></div>';
+            } else {
+                list.forEach(function (n) { html += nodeHtml(n); });
+            }
+            if (idx < TYPE_ORDER.length - 1) { html += '<div class="arrow">→</div>'; }
+        });
+        document.getElementById('chain').innerHTML = html;
+        bindSuppActions();
+    }
+
+    function nodeHtml(n) {
+        var maskCls = n.authorized ? '' : ' masked';
+        var seals = (n.seals || []).map(function (s) {
+            return '<span class="sealchip">' + esc(s.sealNo) + '(' + esc(s.sealStatus) + ')' +
+                (s.verifiedBy ? ' 核验:' + esc(s.verifiedBy) : '') + '</span>';
+        }).join('');
+        var snapPairs = Object.keys(n.snapshot || {}).filter(function (k) { return k !== 'parties'; })
+            .map(function (k) { return '<div><b>' + esc(k) + '</b>：' + esc(JSON.stringify(n.snapshot[k])); }).join('');
+        var parties = (n.snapshot && n.snapshot.parties || []).map(function (p) {
+            return '<div>' + esc(p.role) + '：<span class="' + (p.authorized ? '' : 'masked') + '">' + esc(p.org) + '</span>' +
+                ' / <span class="' + (p.contactVisible ? '' : 'masked') + '">' + esc(p.person) + '</span>' +
+                ' / <span class="' + (p.contactVisible ? '' : 'masked') + '">' + esc(p.phone) + '</span></div>';
+        }).join('');
+        var supp = (n.supplements || []).map(function (s) {
+            return '<li>[' + esc(s.supplementType) + '] ' + esc(s.content) + '（' + esc(s.createTime) + '）</li>';
+        }).join('');
+        return '<div class="node"><h3>' + TYPE_NAMES[n.nodeType] + ' <span class="tag info">' + (SOURCE_TAG[n.source] || n.source) + '</span></h3>' +
+            '<div class="kv">' +
+            '<div><b>节点号：</b>' + esc(n.nodeNo) + '（ID ' + n.id + '）</div>' +
+            '<div><b>批次：</b>' + esc(n.batchNo) + ' / 业务键 ' + esc(n.bizKey) + '</div>' +
+            '<div><b>业务状态：</b>' + esc(n.bizStatus) + '</div>' +
+            '<div><b>发生时间：</b>' + esc(n.occurredTime) + '</div>' +
+            '<div><b>发布：</b>' + esc(n.publishTime) + ' / 操作人ID ' + esc(n.publishBy) + '</div>' +
+            '<div><b>机构：</b><span class="' + maskCls + '">' + esc(n.orgName) + '</span>' +
+            '（' + (n.authorized ? '已授权' : '<span class="masked">未授权已掩码</span>') + '）</div>' +
+            '<div><b>联系：</b><span class="' + (n.contactVisible ? '' : 'masked') + '">' + esc(n.contactName) +
+            ' / ' + esc(n.contactPhone) + '</span></div>' +
+            (seals ? '<div><b>封签锚点：</b>' + seals + '</div>' : '') +
+            '<div><b>备注：</b>' + esc(n.remark) + '</div>' +
+            '<details><summary>状态快照（发布当刻固化，不可变）</summary>' + snapPairs + parties + '</details>' +
+            (supp ? '<details><summary>补录补充（只追加）</summary><ul>' + supp + '</ul></details>' : '') +
+            '<div style="margin-top:6px;"><button type="button" class="ghost" data-supp-node="' + n.id + '">追加补充</button></div>' +
+            '</div></div>';
+    }
+
+    function bindSuppActions() {
+        document.querySelectorAll('[data-supp-node]').forEach(function (btn) {
+            btn.onclick = function () {
+                document.querySelector('#suppForm [name=nodeId]').value = btn.getAttribute('data-supp-node');
+                document.querySelector('#suppForm [name=content]').focus();
+                window.scrollTo(0, document.getElementById('suppForm').getBoundingClientRect().top + window.pageYOffset - 80);
+            };
+        });
+    }
+
+    function collectForm(formId) {
+        var d = {};
+        new FormData(document.getElementById(formId)).forEach(function (v, k) { if (v !== '') { d[k] = v; } });
+        return d;
+    }
+
+    function submitPublish(backfill) {
+        var d = collectForm('publishForm');
+        if (!d.requestId || !d.batchId || !d.nodeType) { show('publishMsg', 'requestId/批次ID/节点类型必填', false); return; }
+        d.batchId = Number(d.batchId);
+        if (d.sealNosCsv) { d.sealNos = d.sealNosCsv.split(',').map(function (s) { return s.trim(); }).filter(Boolean); }
+        delete d.sealNosCsv;
+        var path = backfill ? '/nodes/backfill' : '/nodes/publish';
+        postJson(path, d).then(function (resp) {
+            if (resp.success) {
+                show('publishMsg', (backfill ? '补建' : '发布') + '成功：' + resp.data.nodeNo +
+                    (resp.data.replay ? '（replay 幂等重放，未新增节点）' : '（生效，快照不可变）'), true);
+            } else { show('publishMsg', '被拒绝：' + resp.message + '（并发仲裁/校验未通过，已保留审计）', false); }
+        });
+    }
+    document.getElementById('btnPublish').onclick = function () { submitPublish(false); };
+    document.getElementById('btnBackfill').onclick = function () { submitPublish(true); };
+
+    document.getElementById('suppForm').addEventListener('submit', function () {
+        var d = collectForm('suppForm');
+        d.nodeId = Number(d.nodeId);
+        postJson('/nodes/supplement', d).then(function (resp) {
+            if (resp.success) { show('suppMsg', '补充已追加（ID ' + resp.data.supplementId + '），已发布快照未改变', true); }
+            else { show('suppMsg', '被拒绝：' + resp.message, false); }
+        });
+    });
+
+    document.getElementById('grantForm').addEventListener('submit', function () {
+        var d = collectForm('grantForm');
+        d.contactVisible = d.contactVisible === 'true';
+        postJson('/grants', d).then(function (resp) {
+            if (resp.success) { show('grantMsg', '授权已保存：' + d.username + ' → ' + d.orgName, true); loadGrants(); }
+            else { show('grantMsg', '授权失败：' + resp.message, false); }
+        });
+    });
+    document.getElementById('btnLoadGrants').onclick = loadGrants;
+    function loadGrants() {
+        getJson('/grants').then(function (resp) {
+            if (!resp.success) { return; }
+            var rows = resp.data.map(function (g) {
+                return '<tr><td>' + g.id + '</td><td>' + esc(g.username) + '</td><td>' + esc(g.orgName) + '</td>' +
+                    '<td>' + (g.contactVisible ? '可见明文' : '脱敏') + '</td><td>' +
+                    '<span class="tag ' + (g.status === 'ACTIVE' ? 'ok' : 'lost') + '">' + g.status + '</span></td>' +
+                    '<td>' + esc(g.revokeReason || '') + '</td><td>' +
+                    (g.status === 'ACTIVE' ? '<button class="warn" onclick="revokeGrant(' + g.id + ',\'' + esc(g.username) + '\',\'' + esc(g.orgName) + '\')">撤销</button>' : '—') +
+                    '</td></tr>';
+            }).join('');
+            document.getElementById('grantsBox').innerHTML =
+                '<table style="margin-top:10px;"><tr><th>ID</th><th>账号</th><th>机构</th><th>联系方式</th><th>状态</th><th>撤销原因</th><th>操作</th></tr>' +
+                rows + '</table>';
+        });
+    }
+    function revokeGrant(id, username, orgName) {
+        var reason = prompt('撤销 ' + username + ' 对机构「' + orgName + '」追溯可见授权的原因：');
+        if (!reason) { return; }
+        postJson('/grants/revoke', {id: id, reason: reason}).then(function (resp) {
+            show('grantMsg', resp.success ? '授权已撤销，已发布节点事实保留' : '撤销失败：' + resp.message, resp.success);
+            loadGrants();
+        });
+    }
+
+    document.getElementById('btnLoadAudits').onclick = function () {
+        getJson('/audits').then(function (resp) {
+            if (!resp.success) { return; }
+            var RESULT_TAG = {WIN:'ok', LOST:'lost', INFO:'info', REPLAY:'warn'};
+            var rows = resp.data.map(function (a) {
+                return '<tr><td>' + esc(a.createTime) + '</td><td>' + esc(a.action) + '</td>' +
+                    '<td><span class="tag ' + (RESULT_TAG[a.result] || 'info') + '">' + a.result + '</span></td>' +
+                    '<td>' + esc(a.operatorName) + '</td><td>' + esc(a.batchNo) + '</td><td>' + esc(a.nodeType) +
+                    ' / ' + esc(a.opKey) + '</td><td>' + esc(a.nodeId) + '</td><td>' + esc(a.rejectReason || '') + '</td></tr>';
+            }).join('');
+            document.getElementById('auditsBox').innerHTML =
+                '<table style="margin-top:10px;"><tr><th>时间</th><th>动作</th><th>结果</th><th>操作者</th><th>批次</th><th>操作键</th><th>节点</th><th>拒绝原因</th></tr>' +
+                rows + '</table>';
+        });
+    };
+    loadGrants();
+</script>
+</body>
+</html>

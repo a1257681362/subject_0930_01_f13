@@ -571,4 +571,63 @@ public final class CcConstants {
     public static final String PERM_ESIGN_CORRECT = "coldchain:esign:correct";
     /** 签收冲突主管裁决 */
     public static final String PERM_ESIGN_ADJUDICATE = "coldchain:esign:adjudicate";
+
+    // —— V13 药品批次追溯图 ——
+    /** 追溯节点类型：采购（发货单创建锁定档案版本） */
+    public static final String TRACE_PURCHASE = "PURCHASE";
+    /** 仓储（派车备货/待发运） */
+    public static final String TRACE_WAREHOUSE = "WAREHOUSE";
+    /** 发运（在途） */
+    public static final String TRACE_SHIP = "SHIP";
+    /** 中转（分仓交接提交，责任主体随单转移） */
+    public static final String TRACE_TRANSIT = "TRANSIT";
+    /** 签收（按快照核对闭环） */
+    public static final String TRACE_SIGN = "SIGN";
+    /** 退货（退货登记即固化快照） */
+    public static final String TRACE_RETURN = "RETURN";
+
+    /** 节点来源：业务流程自动发布 */
+    public static final String TRACE_SRC_AUTO = "AUTO";
+    /** 手工发布 */
+    public static final String TRACE_SRC_MANUAL = "MANUAL";
+    /** 漏记节点补建（仍是不可变快照，只是业务发生在过去） */
+    public static final String TRACE_SRC_BACKFILL = "BACKFILL";
+
+    /** 并发仲裁/审计结果：WIN 生效 / LOST 被拒绝 / INFO 一般留痕 / REPLAY 幂等重放 */
+    public static final String TRACE_WIN = "WIN";
+    public static final String TRACE_LOST = "LOST";
+    public static final String TRACE_INFO = "INFO";
+    public static final String TRACE_REPLAY = "REPLAY";
+
+    /** 节点补充类型 */
+    public static final String SUPP_NOTE = "NOTE";
+    public static final String SUPP_FILE = "FILE";
+    public static final String SUPP_CORRECTION_REF = "CORRECTION_REF";
+
+    /** 授权状态 */
+    public static final String GRANT_ACTIVE = "ACTIVE";
+    public static final String GRANT_REVOKED = "REVOKED";
+    /** 全域机构授权通配 */
+    public static final String TRACE_ORG_ALL = "*";
+
+    // V13 操作日志实体类型
+    public static final String ENT_TRACE_NODE = "TRACE_NODE";
+    public static final String ENT_TRACE_GRANT = "TRACE_GRANT";
+
+    // V13 操作动作
+    public static final String ACT_TRACE_PUBLISH = "TRACE_PUBLISH";
+    public static final String ACT_TRACE_SUPPLEMENT = "TRACE_SUPPLEMENT";
+    public static final String ACT_TRACE_EXPORT = "TRACE_EXPORT";
+    public static final String ACT_TRACE_GRANT = "TRACE_GRANT";
+    public static final String ACT_TRACE_GRANT_REVOKE = "TRACE_GRANT_REVOKE";
+
+    // —— V13 Shiro 权限点 ——
+    /** 追溯图查看（节点/链路/反查；可见机构与联系方式再按 t_cc_trace_org_grant 收窄） */
+    public static final String PERM_TRACE_VIEW = "coldchain:trace:view";
+    /** 追溯节点手工发布/漏记补建/节点补充 */
+    public static final String PERM_TRACE_PUBLISH = "coldchain:trace:publish";
+    /** 追溯结果导出（CSV 头标明数据截止时间与过滤条件，逐次留痕） */
+    public static final String PERM_TRACE_EXPORT = "coldchain:trace:export";
+    /** 岗位机构授权维护（决定各岗位可见机构范围与联系方式明文） */
+    public static final String PERM_TRACE_GRANT = "coldchain:trace:grant";
 }

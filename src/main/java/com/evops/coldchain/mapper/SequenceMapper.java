@@ -60,4 +60,7 @@ public interface SequenceMapper {
 
     @Select("SELECT NEXT VALUE FOR seq_cc_sign_receipt_no")
     Long nextSignReceiptNo();
+
+    @Select("SELECT NEXT VALUE FOR seq_cc_trace_node_no")
+    Long nextTraceNodeNo();
 }

@@ -28,6 +28,8 @@ public class OrderService {
     private DrugService drugService;
     @Resource
     private OpLogService opLogService;
+    @Resource
+    private TraceService traceService;
 
     @Transactional
     public ShipmentOrder create(OrderCreateRequest req) {
@@ -55,6 +57,9 @@ public class OrderService {
                 String.format("发货单 %s 创建：药品=%s，锁定档案版本 V%d（批准文号=%s），收货=%s，数量=%d",
                         order.getOrderNo(), drug.getDrugName(), pinnedVersion,
                         version.getApprovalNo(), req.getReceiverOrg(), req.getShipQty()));
+
+        // V13 追溯图采购节点：下单即锁定档案版本的状态快照（此时批次尚未派车，以订单为链路锚）
+        traceService.recordPurchase(order, drug, version);
         return order;
     }
 

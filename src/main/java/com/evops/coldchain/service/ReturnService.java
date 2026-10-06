@@ -78,6 +78,8 @@ public class ReturnService {
     private SequenceMapper sequenceMapper;
     @Resource
     private OpLogService opLogService;
+    @Resource
+    private TraceService traceService;
 
     // ---------------- 退货登记（三类退货原因 + 原批次快照只读关联） ----------------
 
@@ -142,6 +144,9 @@ public class ReturnService {
                 String.format("原批次 %s 登记退货 %s（原因=%s[%s]，数量=%d，关联异常=%s）；原销售批次只读关联，快照已固化",
                         source.getBatchNo(), ret.getReturnNo(), reasonType, reasonTypeName(reasonType),
                         ret.getReturnQty(), linked == null ? "无" : linked.getId()));
+
+        // V13 追溯图退货节点：退货登记当刻固化状态快照（原销售批次只读关联，补录不改已发布快照）
+        traceService.recordReturn(ret);
         return ret;
     }
 
