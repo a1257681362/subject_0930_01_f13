@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>药品批次追溯图</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; margin: 0; background: #f4f6f9; color: #263238; }
+        header { background: #0d47a1; color: #fff; padding: 14px 24px; font-size: 18px; font-weight: bold; }
+        main { max-width: 1320px; margin: 18px auto; padding: 0 16px; }
+        section { background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 16px 20px; margin-bottom: 18px; }
+        h2 { font-size: 16px; margin: 0 0 12px; padding-left: 8px; border-left: 4px solid #0d47a1; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { border: 1px solid #e0e0e0; padding: 6px 8px; text-align: left; vertical-align: top; }
+        th { background: #e3f2fd; white-space: nowrap; }
+        .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 14px; }
+        .grid label { display: flex; flex-direction: column; font-size: 12px; color: #546e7a; gap: 3px; }
+        input, select, textarea { padding: 5px 7px; border: 1px solid #b0bec5; border-radius: 4px; font-size: 13px; }
+        button { padding: 5px 12px; border: none; border-radius: 4px; background: #0d47a1; color: #fff; cursor: pointer; font-size: 12px; }
+        button.ghost { background: #607d8b; }
+        .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+        .tag.ok { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
+        .tag.warn { background: #fff8e1; color: #ef6c00; border: 1px solid #ffe082; }
+        .tag.info { background: #e3f2fd; color: #1565c0; border: 1px solid #90caf9; }
+        .tag.bad { background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
+        .muted { color: #78909c; font-size: 12px; }
+        .banner { border-radius: 8px; padding: 10px 18px; margin-bottom: 18px; font-size: 13px;
+                  background: #e3f2fd; color: #0d47a1; border: 1px solid #90caf9; }
+        .msg { margin: 8px 0; font-size: 13px; white-space: pre-wrap; }
+        .msg.ok { color: #2e7d32; } .msg.err { color: #c62828; }
+        .mono { font-family: Consolas, monospace; }
+        .arrow { color: #0d47a1; font-weight: bold; padding: 0 6px; }
+        .chain { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; }
+        .node { flex: 1; min-width: 180px; border: 1px solid #90caf9; border-radius: 6px; padding: 8px 10px; background: #f8fbff; }
+        .node h3 { margin: 0 0 6px; font-size: 13px; color: #0d47a1; }
+        .node .item { font-size: 12px; margin: 2px 0; }
+        details { margin-top: 6px; } summary { cursor: pointer; color: #0d47a1; font-size: 12px; }
+    </style>
+</head>
+<body>
+<header>冷链 V13 · 药品批次追溯图（采购→仓储→发运→中转→签收→退货 · 发布快照冻结 · 岗位机构/联系方式授权 · 批次/封签反查）</header>
+<main>
+    <div class="banner">
+        当前账号：<b th:text="${currentUser}"></b>；
+        授权机构范围：<span class="mono" th:text="${orgCodes}"></span>（仅这些机构的节点可见）；
+        联系方式按授权明文或脱敏展示。导出 CSV 会标明<b>数据截止时间</b>与<b>全部过滤条件</b>。
+    </div>
+
+    <section>
+        <h2>追溯查询 / 反查</h2>
+        <form id="chainForm" class="grid" style="grid-template-columns: 2fr 1fr auto; align-items:end;">
+            <label>按批次号查询
+                <input name="batchNo" placeholder="如 1（运输批次 batchNo）" required>
+            </label>
+            <span></span>
+            <button type="submit">查追溯图</button>
+        </form>
+        <form id="sealForm" class="grid" style="grid-template-columns: 2fr 1fr auto; align-items:end; margin-top:10px;">
+            <label>按封签号反查（跨批次）
+                <input name="sealNo" placeholder="如 SEAL-V13-0001" required>
+            </label>
+            <span></span>
+            <button type="submit" class="ghost">封签反查</button>
+        </form>
+        <div id="queryMsg" class="msg"></div>
+        <div class="muted" id="cutoff"></div>
+    </section>
+
+    <section id="chainSection" style="display:none;">
+        <h2>追溯链路（节点保存当时状态；已发布快照不可被补录改变）</h2>
+        <div id="chain" class="chain"></div>
+        <p class="muted" id="filterInfo"></p>
+    </section>
+
+    <section>
+        <h2>登记追溯节点（同一操作并发：相同 opKey 仅一生效，落败拒绝并留审计）</h2>
+        <form id="nodeForm" class="grid">
+            <label>opKey（同一操作归并键，必填）<input name="opKey" required placeholder="如 seal-0001-confirm"></label>
+            <label>运输批次ID<input name="batchId" type="number" required></label>
+            <label>节点类型
+                <select name="nodeType">
+                    <option value="PURCHASE">采购 PURCHASE</option>
+                    <option value="WAREHOUSE">仓储 WAREHOUSE</option>
+                    <option value="DISPATCH">发运 DISPATCH</option>
+                    <option value="TRANSIT">中转 TRANSIT</option>
+                    <option value="SIGN">签收 SIGN</option>
+                    <option value="RETURN">退货 RETURN</option>
+                </select>
+            </label>
+            <label>业务发生时间<input name="occurredTime" type="datetime-local" required></label>
+            <label>机构代码（须在授权范围内）<input name="orgCode" required></label>
+            <label>机构名称<input name="orgName" required></label>
+            <label>联系人<input name="contactName"></label>
+            <label>联系方式<input name="contactPhone"></label>
+            <label>封签号（可空）<input name="sealNo"></label>
+            <label>是否补录
+                <select name="backfill"><option value="false">否（实时登记）</option><option value="true">是（事后补录）</option></select>
+            </label>
+            <label>补录原因（补录必填）<input name="backfillReason"></label>
+            <label>创建即发布
+                <select name="publish"><option value="false">否（先存草稿）</option><option value="true">是（立即固化快照）</option></select>
+            </label>
+            <label style="grid-column: 1 / -1;">当时状态快照
+                <textarea name="statusSnap" rows="2" required placeholder="如：到货 20 箱，封签完好，交接温度 4.2℃，接收人 李验收"></textarea>
+            </label>
+        </form>
+        <p><button type="button" id="nodeBtn">登记节点</button> <span id="nodeMsg" class="msg"></span></p>
+        <p class="muted">草稿可修订（/nodes/{id}/revise）；发布后补录不能改变已发布快照，新事实只能另追加节点。</p>
+    </section>
+
+    <section>
+        <h2>导出（标明数据截止时间与过滤条件）</h2>
+        <form id="exportForm" class="grid" style="grid-template-columns: repeat(4,1fr) auto; align-items:end;">
+            <label>批次号<input name="batchNo"></label>
+            <label>封签号<input name="sealNo"></label>
+            <label>节点类型
+                <select name="nodeType">
+                    <option value="">全部</option>
+                    <option>PURCHASE</option><option>WAREHOUSE</option><option>DISPATCH</option>
+                    <option>TRANSIT</option><option>SIGN</option><option>RETURN</option>
+                </select>
+            </label>
+            <label>机构代码<input name="orgCode"></label>
+            <button type="submit" class="ghost">导出 CSV</button>
+        </form>
+    </section>
+</main>
+
+<script>
+    var API = '/api/cold-chain';
+    function $(id) { return document.getElementById(id); }
+    function postJson(path, data) {
+        return fetch(API + path, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            credentials: 'same-origin', body: JSON.stringify(data)
+        }).then(function (r) { return r.json(); });
+    }
+    function esc(s) {
+        return (s == null ? '' : String(s)).replace(/[&<>"]/g, function (c) {
+            return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+        });
+    }
+    var TYPE_NAME = {PURCHASE:'采购',WAREHOUSE:'仓储',DISPATCH:'发运',TRANSIT:'中转',SIGN:'签收',RETURN:'退货'};
+
+    function renderChain(chain) {
+        $('chainSection').style.display = '';
+        $('cutoff').textContent = '数据截止时间：' + chain.dataCutoffTime
+                + '（该时间之后发布/补录的数据不在本次结果内）；节点数=' + chain.nodeCount
+                + '；因机构授权过滤掉=' + chain.filteredOutByOrgAuth;
+        var groups = chain.groups || {};
+        var order = ['PURCHASE','WAREHOUSE','DISPATCH','TRANSIT','SIGN','RETURN'];
+        var html = '';
+        order.forEach(function (t, i) {
+            var list = groups[t] || [];
+            var body = '';
+            if (list.length === 0) {
+                body = '<div class="item muted">（无授权可见节点）</div>';
+            } else {
+                list.forEach(function (n) {
+                    var phone = n.contactPhone == null || n.contactPhone === '' ? '—'
+                            : esc(n.contactPhone) + (n.contactPhoneMasked ? '（脱敏）' : '');
+                    body += '<div class="item">'
+                        + '<span class="tag ' + (n.published ? 'ok' : 'warn') + '">' + (n.published ? '已发布' : '草稿') + '</span> '
+                        + (n.backfill ? '<span class="tag info">补录</span> ' : '')
+                        + '<span class="mono">#' + n.nodeSeq + '</span></div>'
+                        + '<div class="item">机构：' + esc(n.orgName) + '</div>'
+                        + '<div class="item">联系人/电话：' + esc(n.contactName) + ' / ' + phone + '</div>'
+                        + (n.sealNo ? '<div class="item">封签：' + esc(n.sealNo) + '</div>' : '')
+                        + '<div class="item">发生：' + esc(n.occurredTime) + '</div>'
+                        + '<div class="item">状态快照：' + esc(n.statusSnap) + '</div>'
+                        + (n.snapshotHash ? '<details><summary>发布快照 hash</summary><span class="mono">' + esc(n.snapshotHash) + '</span></details>' : '');
+                });
+            }
+            html += '<div class="node"><h3>' + TYPE_NAME[t] + ' ' + t + '</h3>' + body + '</div>';
+            if (i < order.length - 1) { html += '<div class="arrow">→</div>'; }
+        });
+        $('chain').innerHTML = html;
+        $('filterInfo').textContent = '批次 ' + chain.batchNo + '（' + chain.batchStatus
+                + '）；授权机构范围：' + JSON.stringify(chain.authorizedOrgCodes);
+    }
+
+    $('chainForm').addEventListener('submit', function (e) {
+        e.preventDefault();
+        var batchNo = new FormData(this).get('batchNo');
+        $('queryMsg').className = 'msg'; $('queryMsg').textContent = '查询中…';
+        fetch(API + '/trace/by-batch-no?batchNo=' + encodeURIComponent(batchNo), {credentials: 'same-origin'})
+            .then(function (r) { return r.json(); }).then(function (resp) {
+                if (resp.success) { $('queryMsg').textContent = ''; renderChain(resp.data); }
+                else { $('queryMsg').className = 'msg err'; $('queryMsg').textContent = '查询失败：' + resp.message; }
+            });
+    });
+
+    $('sealForm').addEventListener('submit', function (e) {
+        e.preventDefault();
+        var sealNo = new FormData(this).get('sealNo');
+        $('queryMsg').className = 'msg'; $('queryMsg').textContent = '反查中…';
+        fetch(API + '/trace/by-seal?sealNo=' + encodeURIComponent(sealNo), {credentials: 'same-origin'})
+            .then(function (r) { return r.json(); }).then(function (resp) {
+                if (!resp.success) { $('queryMsg').className = 'msg err'; $('queryMsg').textContent = '反查失败：' + resp.message; return; }
+                $('queryMsg').className = 'msg ok';
+                $('queryMsg').textContent = '封签 ' + sealNo + ' 命中 ' + resp.data.matchCount + ' 条（数据截止 ' + resp.data.dataCutoffTime + '）';
+                if (resp.data.matchCount > 0) { renderChain(resp.data.matches[0].chain); }
+                else { $('chainSection').style.display = 'none'; }
+            });
+    });
+
+    $('nodeBtn').addEventListener('click', function () {
+        var data = {};
+        new FormData($('nodeForm')).forEach(function (v, k) { if (v !== '') { data[k] = v; } });
+        data.batchId = Number(data.batchId);
+        data.backfill = data.backfill === 'true';
+        data.publish = data.publish === 'true';
+        $('nodeMsg').className = 'msg'; $('nodeMsg').textContent = '提交中…';
+        postJson('/trace/nodes', data).then(function (resp) {
+            if (resp.success) {
+                $('nodeMsg').className = 'msg ok';
+                $('nodeMsg').textContent = '登记成功：' + resp.data.nodeNo
+                    + '（状态 ' + resp.data.status + '）';
+            } else {
+                $('nodeMsg').className = 'msg err';
+                $('nodeMsg').textContent = '被拒绝：' + resp.message;
+            }
+        });
+    });
+
+    $('exportForm').addEventListener('submit', function (e) {
+        var p = new URLSearchParams(new FormData(this)).toString();
+        window.location.href = API + '/trace/export?' + p;
+    });
+</script>
+</body>
+</html>

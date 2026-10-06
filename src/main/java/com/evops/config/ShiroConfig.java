@@ -284,6 +284,29 @@ public class ShiroConfig {
         chain.addPathDefinition("/api/cold-chain/esign/**",
                 "authcBasic, perms[" + com.evops.coldchain.CcConstants.PERM_ESIGN_VIEW + "]");
 
+        // —— V13 药品批次追溯图（具体写路径在前，宽泛只读在后）——
+        // 导出：独立导出权限（文件标明数据截止时间与过滤条件）
+        chain.addPathDefinition("/api/cold-chain/trace/export",
+                "authcBasic, perms[" + com.evops.coldchain.CcConstants.PERM_TRACE_EXPORT + "]");
+        // 节点维护（登记/修订/发布）
+        chain.addPathDefinition("/api/cold-chain/trace/nodes",
+                "authcBasic, perms[" + com.evops.coldchain.CcConstants.PERM_TRACE_MANAGE + "]");
+        chain.addPathDefinition("/api/cold-chain/trace/nodes/*/revise",
+                "authcBasic, perms[" + com.evops.coldchain.CcConstants.PERM_TRACE_MANAGE + "]");
+        chain.addPathDefinition("/api/cold-chain/trace/nodes/*/publish",
+                "authcBasic, perms[" + com.evops.coldchain.CcConstants.PERM_TRACE_MANAGE + "]");
+        // 岗位机构授权维护
+        chain.addPathDefinition("/api/cold-chain/trace/auths",
+                "authcBasic, perms[" + com.evops.coldchain.CcConstants.PERM_TRACE_AUTH_MANAGE + "]");
+        chain.addPathDefinition("/api/cold-chain/trace/auths/revoke",
+                "authcBasic, perms[" + com.evops.coldchain.CcConstants.PERM_TRACE_AUTH_MANAGE + "]");
+        // 链路/反查/审计/节点详情/本人授权只读（机构范围与联系方式在服务层兜底）
+        chain.addPathDefinition("/api/cold-chain/trace/**",
+                "authcBasic, perms[" + com.evops.coldchain.CcConstants.PERM_TRACE_VIEW + "]");
+        // 追溯图页面
+        chain.addPathDefinition("/ui/cold-chain/trace",
+                "authcBasic, perms[" + com.evops.coldchain.CcConstants.PERM_TRACE_VIEW + "]");
+
         // 冷链台账接口与管理页面使用 HTTP Basic，便于 curl/联调；浏览器会弹出登录框
         chain.addPathDefinition("/api/**", "authcBasic");
         chain.addPathDefinition("/ui/**", "authcBasic");

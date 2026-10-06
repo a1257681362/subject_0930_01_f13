@@ -1089,3 +1089,102 @@ curl -u qa:qa123 -OJ http://localhost:8080/api/cold-chain/returns/1/evidence
 不冻结；人工修正只追加（原行不变、有效值视图随最新修正、设备时间禁止修正）；批量同步
 部分成功时失败/部分回执各开立电子签收侧↔离线回执侧互指补偿、同步幂等不重复开立、
 补传成功后两侧补偿一并闭环。全套 62 个用例通过。
+## 冷链运输 V13：药品批次追溯图
+
+以批次为主线串联药品全链路：**采购 → 仓储 → 发运 → 中转（可多次）→ 签收 → 退货（可缺省/多次）**。
+每个节点保存业务发生当时的状态快照；草稿可修订，发布后快照冻结，补录不能改变已发布快照，
+只能另追加节点。同一操作并发发起时由数据库唯一约束仲裁唯一生效者，落败方拒绝并保留审计。
+查询/反查/导出按岗位授权机构与联系方式可见性收窄；支持按批次号和封签号反查；
+导出 CSV 标明数据截止时间与全部过滤条件。
+
+### 业务规则
+
+- **六节点链路**：`PURCHASE` 采购 / `WAREHOUSE` 仓储 / `DISPATCH` 发运 / `TRANSIT` 中转 /
+  `SIGN` 签收 / `RETURN` 退货。同批次同类型节点序号从 1 递增（中转/退货可多条），
+  链路严格按 采购→仓储→发运→中转→签收→退货 次序返回。
+- **当时状态快照冻结**：节点先以 `DRAFT` 落库（可反复修订，`revision` 递增留痕）；
+  `POST /trace/nodes/{id}/publish` 发布时把完整状态（机构/联系人/封签/发生时间/状态摘要/
+  是否补录 + **发布当刻批次状态**）固化为 `snapshot_json` 并计算 SHA-256 `snapshot_hash`。
+  已发布节点只读——修订、重复发布或以补录名义改写一律拒绝（`PUBLISHED_IMMUTABLE`），
+  新事实只能另追加一个节点，原快照 hash 不变。`publish=true` 可登记即发布。
+- **补录**：`backfill=true` 必须填 `backfillReason`；补录同样走快照冻结规则，
+  只追加新节点事实，绝不覆盖任何已发布节点。
+- **同一操作并发仲裁**：`opKey` 是“同一操作”的归并键，`t_cc_trace_node.op_key`
+  唯一约束在数据库层仲裁：
+  - 同一 opKey 重复/并发发起（载荷相同或不同）：先提交者 `WINNER` 生效，其余 `REJECTED`
+    （`CONCURRENT`；插入时相撞或预检查发现已存在都按并发拒绝）；
+  - 同键不同载荷：`REJECTED/DIFFERENT_PAYLOAD`；
+  - 只有显式 `idempotentReplay=true` 且载荷与首个请求完全一致的网络重试，才幂等回放首个节点；
+  - 生效方写 `WINNER` 审计，被拒方审计以**独立事务**落库（业务事务回滚不影响它），
+    双方都在 `t_cc_trace_concurrent_log` 留痕：opKey、生效节点、双方账号、载荷是否一致、请求摘要。
+- **岗位数据隔离**：`t_cc_trace_org_auth` 维护 账号→可见机构（`*`=全域）+ 联系方式明文开关。
+  链路/反查只返回授权机构节点（返回 `filteredOutByOrgAuth` 说明被过滤数量）；登记节点要求
+  机构在本岗位授权可写范围内，越权机构直接拒绝；无任何授权查不到任何节点。
+- **联系方式明文/脱敏**：覆盖该机构且 `contact_visible=TRUE` 的授权才明文；否则电话按
+  前3后2中间星号脱敏（如 `13912345678→139******78`），视图以 `contactPhoneMasked` 标明口径。
+  内置授权：admin 全域明文、qa 全域脱敏、dispatcher 采购站/中心仓明文、carrier 中心仓/杭州中转明文、
+  receiver 杭州一院明文。
+- **反查**：按批次号 `GET /trace/by-batch-no?batchNo=` 取整链；
+  按封签号 `GET /trace/by-seal?sealNo=` 跨批次命中所有登记该封签的节点及各自链路（同样授权过滤）。
+- **导出**：`GET /trace/export` 返回带 UTF-8 BOM 的 CSV，头部明确标注 **数据截止时间**
+  （服务器导出当刻，之后发布/补录的数据不在文件内）、批次号/封签号/节点类型/机构四个过滤条件、
+  授权机构范围、导出账号、联系方式口径与被授权过滤掉的节点数；逐次导出写操作日志。
+- **数据截止时间**：链路/反查结果同样带 `dataCutoffTime`（本次结果的时点口径）。
+
+### 表结构增量（schema.sql，版本标记 `cold-chain-13`）
+
+| 表 | 作用 |
+| --- | --- |
+| `t_cc_trace_node` | 追溯节点（六类型、序号、op_key 唯一、封签、机构/联系方式、snapshot_json/hash、补录标记、revision、DRAFT/PUBLISHED、发布人与批次状态快照） |
+| `t_cc_trace_concurrent_log` | 并发仲裁审计（只追加）：WINNER/REJECTED、CONCURRENT/DIFFERENT_PAYLOAD/PUBLISHED_IMMUTABLE、双方账号与请求摘要 |
+| `t_cc_trace_org_auth` | 岗位机构授权：username+org_code（`*` 全域）、contact_visible |
+
+### 接口增量（`/api/cold-chain` 下，HTTP Basic）
+
+| 动作 | 方法与路径 | 权限点 |
+| --- | --- | --- |
+| 登记节点（含并发仲裁、可登记即发布） | `POST /trace/nodes` | `coldchain:trace:manage` |
+| 修订草稿节点 | `POST /trace/nodes/{id}/revise` | `coldchain:trace:manage` |
+| 发布（固化当时快照） | `POST /trace/nodes/{id}/publish` | `coldchain:trace:manage` |
+| 节点详情（授权过滤） | `GET /trace/nodes/{id}` | `coldchain:trace:view` |
+| 按批次ID取追溯图 | `GET /trace/batches/{batchId}` | `coldchain:trace:view` |
+| 按批次号反查 | `GET /trace/by-batch-no?batchNo=` | `coldchain:trace:view` |
+| 按封签号跨批次反查 | `GET /trace/by-seal?sealNo=` | `coldchain:trace:view` |
+| 并发仲裁审计 | `GET /trace/concurrent-logs?opKey=` | `coldchain:trace:view` |
+| 授予岗位机构授权 | `POST /trace/auths` | `coldchain:trace:auth:manage` |
+| 收回授权 | `POST /trace/auths/revoke?username=&orgCode=` | `coldchain:trace:auth:manage` |
+| 本人授权范围 | `GET /trace/auths/mine` | `coldchain:trace:view` |
+| 追溯 CSV 导出（标截止时间/过滤条件） | `GET /trace/export?batchNo=&sealNo=&nodeType=&orgCode=` | `coldchain:trace:export` |
+
+页面：`/ui/cold-chain/trace`（需 `coldchain:trace:view`）。
+
+```bash
+# 调度登记采购节点（授权机构 PURCHASE-001），登记即发布
+curl -s -u dispatcher:dispatcher123 -H 'Content-Type: application/json' -X POST \
+  http://localhost:8080/api/cold-chain/trace/nodes -d '{
+    "opKey":"seal-0001-confirm","batchId":1,"nodeType":"PURCHASE",
+    "occurredTime":"2026-10-05T09:00:00","orgCode":"PURCHASE-001","orgName":"上海医药采购站",
+    "contactName":"张采购","contactPhone":"13800001111",
+    "statusSnap":"采购到货 20 盒，批准文号核对一致","publish":true}'
+
+# 承运、收货分别登记 发运/中转/签收 节点（中转、签收带同一封签号，支持封签反查）
+# 同一操作并发：三方用相同 opKey 同时 POST，恰好一方成功；另两方 success=false，
+# message 指明“已由账号[X]先生效…被拒绝（CONCURRENT）”，/trace/concurrent-logs?opKey= 可查双方审计
+
+# 按批次号 / 封签号反查（只返回本账号授权机构节点，电话按授权明文或脱敏）
+curl -s -u qa:qa123 'http://localhost:8080/api/cold-chain/trace/by-seal?sealNo=SEAL-0001'
+# 导出（文件头含数据截止时间与过滤条件；qa 全域但电话脱敏）
+curl -s -u qa:qa123 'http://localhost:8080/api/cold-chain/trace/export?nodeType=PURCHASE' -o trace.csv
+```
+
+### V13 验收
+
+`TraceChainIntegrationTest`（6 个用例，内存 H2 + 真实 Shiro HTTP Basic，3 线程 CyclicBarrier
+真实并发）覆盖：六节点链路与固定次序、发布快照含发布当刻批次状态且 hash 冻结、草稿可修订/
+已发布修订与重复发布拒绝并留 `PUBLISHED_IMMUTABLE` 审计、补录只追加不改原快照；岗位机构
+隔离（越权机构登记拒绝、无授权节点不可见、`filteredOutByOrgAuth` 计数）与联系方式明文/脱敏；
+批次号与封签号跨批次反查（授权范围外 0 命中）；导出 CSV 含数据截止时间/过滤条件/授权范围/
+导出账号/脱敏电话并逐次写导出审计、无导出权 403；同一操作 3 线程并发恰好 1 生效 2 拒绝、
+节点表仅 1 行、`WINNER/REJECTED/CONCURRENT` 双方审计齐全且被拒审计指向生效节点、
+未声明重放的重复请求拒绝、`idempotentReplay=true` 同载荷幂等回放、同键不同载荷
+`DIFFERENT_PAYLOAD` 拒绝留痕；401/403/200 权限校验。全套 68 个用例通过。
